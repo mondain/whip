@@ -1,0 +1,38 @@
+<html>
+<head>
+<title>Whip</title>
+<script type="text/javascript" src="whip.js"></script>
+</head>
+<body>
+<b>Whip it! real good</b>
+<br />
+<script>
+//Create peerconnection
+var RTCPeerConnection = navigator.mozGetUserMedia ? mozRTCPeerConnection : webkitRTCPeerConnection;
+const pc = new RTCPeerConnection();
+//Get mic+cam
+navigator.mediaDevices.getUserMedia({
+  audio: true,
+  video: {
+    width: { min: 640 },
+    height: { min: 480 }
+  }
+})
+.then(function(stream) {
+	//Send all tracks
+	for (const track of stream.getTracks()) {
+		pc.addTrack(track);
+	}
+})
+.catch(function(err) {
+  console.error(err);
+});
+const url = "http://localhost:5080/whip/endpoint?streamId=stream1";
+const token = "thisisntusedyet";
+//Create whip client
+const whip = new WHIPClient();
+//Start publishing
+whip.publish(url, token, pc);
+</script>
+</body>
+</html>
