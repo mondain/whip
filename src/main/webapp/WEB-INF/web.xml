@@ -11,7 +11,7 @@
     </context-param>
     <servlet>
         <servlet-name>endpoint</servlet-name>
-        <servlet-class>org.red5.whip.Endpoint</servlet-class>
+        <servlet-class>org.red5.whip.WhipEndpoint</servlet-class>
     </servlet>
     <servlet-mapping>
     	<servlet-name>endpoint</servlet-name>
