@@ -46,6 +46,7 @@ import org.red5.codec.AVCVideo;
 import org.red5.codec.StreamCodecInfo;
 import org.red5.server.api.IContext;
 import org.red5.server.api.Red5;
+import org.red5.server.api.IConnection.Duty;
 import org.red5.server.api.scope.IScope;
 import org.red5.server.stream.IProviderService;
 import org.slf4j.Logger;
@@ -130,11 +131,11 @@ public class WhipPublisher implements IRTCStream {
     // ICE agent
     private volatile Agent agent;
 
-    protected CountDownLatch iceSetupLatch;
+    private CountDownLatch iceSetupLatch;
 
-    protected String publicIPAddress = NetworkManager.getPublicAddress();
+    private String publicIPAddress = NetworkManager.getPublicAddress();
 
-    protected String localIPAddress = NetworkManager.getLocalAddress();
+    private String localIPAddress = NetworkManager.getLocalAddress();
 
     // port allocated and paired by this stream instance
     private int allocatedPort;
@@ -146,10 +147,10 @@ public class WhipPublisher implements IRTCStream {
     private RTPCodecEnum selectedVideoCodec = RTPCodecEnum.H264_PMODE1;
 
     // the offer sdp
-    protected SessionDescription offerSdp;
+    private SessionDescription offerSdp;
 
     // the answer sdp
-    protected String answerSdp;
+    private String answerSdp;
 
     private int audioBR = 128;
 
@@ -181,7 +182,7 @@ public class WhipPublisher implements IRTCStream {
     private AtomicBoolean stopped = new AtomicBoolean();
 
     // stream connector established upon successful ICE establishment
-    protected StreamConnector streamConnector;
+    private StreamConnector streamConnector;
 
     /**
      * Whip / WebRTC publisher stream.
@@ -223,6 +224,8 @@ public class WhipPublisher implements IRTCStream {
         if (medias == null) {
             throw new Exception("No media fields offered");
         }
+        // create a muxer
+        muxer = new MuxMaster(proStream);
         for (MediaField media : medias) {
             SDPMediaType mediaType = media.getMediaType();
             if (isTrace) {
@@ -241,18 +244,19 @@ public class WhipPublisher implements IRTCStream {
                         // add a media field to our local sdp
                         MediaField audio = new MediaField(mediaType, 9, MediaField.PROTOCOL_UDP, 1);
                         localSdp.addMediaDescription(audio);
-                        log.debug("Audio streams in local sdp: {}  bw: {}", localSdp.getAudio(), media.getBandwidth());
-                        // check media level bandwidth
-                        bandwidth = media.getBandwidth();
-                        if (bandwidth != null) {
-                            audioBR = bandwidth.getBandwidth();
-                            requestedAudioBitrate = audioBR * 1000;
-                        } else {
-                            requestedAudioBitrate = audioBR * 1000;
-                        }
+                        log.debug("Audio streams in local sdp: {}", localSdp.getAudio());
                         break;
                     }
                 }
+                // check media level bandwidth
+                bandwidth = media.getBandwidth();
+                if (bandwidth != null) {
+                    audioBR = bandwidth.getBandwidth();
+                    requestedAudioBitrate = audioBR * 1000;
+                } else {
+                    requestedAudioBitrate = audioBR * 1000;
+                }
+                log.debug("Audio streams bitrate: {}", requestedAudioBitrate);
             } else if (SDPMediaType.video.equals(mediaType)) { // detect video type
                 // look over all incoming rtpmap for our server preferred codec(s)
                 List<AttributeField> videoCodecs = media.getAttributeSelections(AttributeKey.rtpmap, EnumSet.of(RTPCodecEnum.H264_PMODE1, RTPCodecEnum.VP8));
@@ -262,18 +266,16 @@ public class WhipPublisher implements IRTCStream {
                     String[] videoCodecParts = videoCodec.split("[\\s|\\/]");
                     int pt = Integer.valueOf(videoCodecParts[0]);
                     String videoCodecName = videoCodecParts[1];
+                    log.debug("Offerred video codec: {} {} {}", videoCodec, pt, videoCodecName);
                     String offeredFmtp = media.getAttribute(AttributeKey.fmtp, pt).getValue();
                     String[] fmtpParts = offeredFmtp.split("[\\s|\\;]");
                     for (String encName : videoEncNames) {
                         if (encName.equalsIgnoreCase(videoCodecName)) {
                             selectedVideoCodec = RTPCodecEnum.getByEncodingName(encName);
-                            // add a media field to our local sdp
-                            MediaField video = new MediaField(mediaType, 9, MediaField.PROTOCOL_UDP, 1);
-                            localSdp.addMediaDescription(video);
                             if (RTPCodecEnum.getByEncodingName(encName) == RTPCodecEnum.H264_PMODE1 && offeredFmtp.contains("packetization-mode=1")) {
                                 // sort out the differing h264 profiles
                                 H264Profile selected = H264Profile.None;
-                                String profile = "42801f";
+                                String profile = "42e01f";
                                 String profileSent = null;
                                 for (String part : fmtpParts) {
                                     int idx = -1;
@@ -281,12 +283,15 @@ public class WhipPublisher implements IRTCStream {
                                         profileSent = part.substring(idx + 17);
                                         int results = acceptProfile(selected, profileSent);
                                         if (results > selected.ordinal()) {
-                                            log.debug("Upgrading profile to payload id: {}  , {}", pt, profileSent);
+                                            log.debug("Upgrading profile to payload id: {}, {}", pt, profileSent);
                                             selected = H264Profile.valueOf(results);
                                             profile = profileSent;
+                                            // add a media field to our local sdp
+                                            MediaField video = new MediaField(mediaType, 9, MediaField.PROTOCOL_UDP, 1);
                                             videoPayloadType = pt;
                                             AttributeField fmtp = new AttributeField(AttributeKey.fmtp, String.format("%d profile-level-id=%s;level-asymmetry-allowed=1;packetization-mode=1", videoPayloadType, profile));
                                             video.addAttributeField(fmtp);
+                                            localSdp.addMediaDescription(video);
                                             break;
                                         } else {
                                             log.debug("Skipping profile in sdp offer: {}", profileSent);
@@ -294,18 +299,19 @@ public class WhipPublisher implements IRTCStream {
                                     }
                                 }
                             }
-                            log.debug("Video streams in local sdp: {} bw: {}", localSdp.getVideo(), media.getBandwidth());
-                            bandwidth = media.getBandwidth();
-                            if (bandwidth != null) {
-                                videoBR = bandwidth.getBandwidth();
-                                requestedVideoBitrate = videoBR * 1000;
-                            } else {
-                                requestedVideoBitrate = videoBR * 1000;
-                            }
+                            log.debug("Video streams in local sdp: {}", localSdp.getVideo());
                             break;
                         }
                     }
                 }
+                bandwidth = media.getBandwidth();
+                if (bandwidth != null) {
+                    videoBR = bandwidth.getBandwidth();
+                    requestedVideoBitrate = videoBR * 1000;
+                } else {
+                    requestedVideoBitrate = videoBR * 1000;
+                }
+                log.debug("Video streams bitrate: {}", requestedVideoBitrate);
             } else if (SDPMediaType.application.equals(mediaType)) {
                 MediaField offeredData = offerSdp.getMediaDescription(SDPMediaType.application);
                 MediaField data = null;
@@ -328,8 +334,8 @@ public class WhipPublisher implements IRTCStream {
         }
         // setup DTLS
         setupDTLS(offeredDataChannel);
-        // setup ice (non-controlling)
-        setupICE(false);
+        // setup ice (controlling = true, non-controlling = false)
+        setupICE(true);
         // set the props
         setRemoteProperties(offerSdp);
         DtlsControl control = null;
@@ -455,8 +461,6 @@ public class WhipPublisher implements IRTCStream {
         // if we're bundling, create the bundle stream
         mediaStream = new WhipMediaStreamBundle(conn, audioMediaStream, videoMediaStream, dataMediaStream);
         mediaStream.setSrtpControl(control);
-        // create a muxer
-        muxer = new MuxMaster(proStream);
         log.trace("init - exit");
     }
 
@@ -596,6 +600,8 @@ public class WhipPublisher implements IRTCStream {
             }
             StreamCodecInfo info = (StreamCodecInfo) proStream.getCodecInfo();
             log.debug("ProStream codec info: {} {}", info.getAudioCodecName(), info.getVideoCodecName());
+            // set an id
+            mediaStream.setProperty("id", getName());
             // set start time on media streams and for RTCP use
             mediaStream.setProstreamStartTime(proStream.getCreationTime());
             // start the flash stream
@@ -913,9 +919,19 @@ public class WhipPublisher implements IRTCStream {
                 dtlsControl = controls.get("audio");
                 audio.addAttributeField(new AttributeField(AttributeKey.iceufrag, agent.getLocalUfrag()));
                 audio.addAttributeField(new AttributeField(AttributeKey.icepwd, agent.getLocalPassword()));
+                if (agent.isTrickling()) {
+                    audio.addAttributeField(new AttributeField(AttributeKey.iceoptions, "trickle"));
+                }
                 audio.addAttributeField(new AttributeField(AttributeKey.fingerprint, dtlsControl.getLocalFingerprintHashFunction() + ' ' + dtlsControl.getLocalFingerprint()));
-                audio.addAttributeField(new AttributeField(AttributeKey.setup, dtlsControl.getSetup().toString()));
+                audio.addAttributeField(new AttributeField(AttributeKey.setup, dtlsControlSetup.toString()));
                 audio.addAttributeField(new AttributeField(AttributeKey.mid, offerSdp.getMediaDescription(SDPMediaType.audio).getMediaId()));
+                // add our candidates
+                // a=candidate:1 1 udp 2015363583 192.168.1.218 49207 typ host
+                cands.forEach(c -> {
+                    audio.addAttributeField(new AttributeField(AttributeKey.candidate, c));
+                });
+                // a=end-of-candidates
+                audio.addAttributeField(new AttributeField(AttributeKey.endofcandidates, null));
                 audio.addAttributeField(new AttributeField(AttributeKey.recvonly, null));
                 audio.addAttributeField(new AttributeField(AttributeKey.rtcpmux, null));
                 audio.addAttributeField(new AttributeField(AttributeKey.rtcprsize, null));
@@ -931,13 +947,6 @@ public class WhipPublisher implements IRTCStream {
                         }
                     }
                 }
-                // add our candidates
-                // a=candidate:1 1 udp 2015363583 192.168.1.218 49207 typ host
-                cands.forEach(c -> {
-                    audio.addAttributeField(new AttributeField(AttributeKey.candidate, c));
-                });
-                // a=end-of-candidates
-                audio.addAttributeField(new AttributeField(AttributeKey.endofcandidates, null));
             } else {
                 // audio codec selection failed if we're here
                 localSdp.remove(audio);
@@ -957,9 +966,19 @@ public class WhipPublisher implements IRTCStream {
                 dtlsControl = controls.get("video");
                 video.addAttributeField(new AttributeField(AttributeKey.iceufrag, agent.getLocalUfrag()));
                 video.addAttributeField(new AttributeField(AttributeKey.icepwd, agent.getLocalPassword()));
+                if (agent.isTrickling()) {
+                    video.addAttributeField(new AttributeField(AttributeKey.iceoptions, "trickle"));
+                }
                 video.addAttributeField(new AttributeField(AttributeKey.fingerprint, dtlsControl.getLocalFingerprintHashFunction() + ' ' + dtlsControl.getLocalFingerprint()));
-                video.addAttributeField(new AttributeField(AttributeKey.setup, dtlsControl.getSetup().toString()));
+                video.addAttributeField(new AttributeField(AttributeKey.setup, dtlsControlSetup.toString()));
                 video.addAttributeField(new AttributeField(AttributeKey.mid, offeredVideo.getMediaId()));
+                // add our candidates
+                // a=candidate:1 1 udp 2015363583 192.168.1.218 49207 typ host
+                cands.forEach(c -> {
+                    video.addAttributeField(new AttributeField(AttributeKey.candidate, c));
+                });
+                // a=end-of-candidates
+                video.addAttributeField(new AttributeField(AttributeKey.endofcandidates, null));
                 video.addAttributeField(new AttributeField(AttributeKey.recvonly, null));
                 video.addAttributeField(new AttributeField(AttributeKey.rtcpmux, null));
                 video.addAttributeField(new AttributeField(AttributeKey.rtcprsize, null));
@@ -987,13 +1006,6 @@ public class WhipPublisher implements IRTCStream {
                         }
                     }
                 }
-                // add our candidates
-                // a=candidate:1 1 udp 2015363583 192.168.1.218 49207 typ host
-                cands.forEach(c -> {
-                    video.addAttributeField(new AttributeField(AttributeKey.candidate, c));
-                });
-                // a=end-of-candidates
-                video.addAttributeField(new AttributeField(AttributeKey.endofcandidates, null));
             } else {
                 // video codec selection failed if we're here
                 localSdp.remove(video);
@@ -1009,7 +1021,7 @@ public class WhipPublisher implements IRTCStream {
                 data.addAttributeField(new AttributeField(AttributeKey.iceufrag, agent.getLocalUfrag()));
                 data.addAttributeField(new AttributeField(AttributeKey.icepwd, agent.getLocalPassword()));
                 data.addAttributeField(new AttributeField(AttributeKey.fingerprint, dtlsControl.getLocalFingerprintHashFunction() + ' ' + dtlsControl.getLocalFingerprint()));
-                data.addAttributeField(new AttributeField(AttributeKey.setup, dtlsControl.getSetup().toString()));
+                data.addAttributeField(new AttributeField(AttributeKey.setup, dtlsControlSetup.toString()));
                 // get media id from offer
                 data.addAttributeField(new AttributeField(AttributeKey.mid, offeredData.getMediaId()));
                 // data channel is send and receive
@@ -1022,7 +1034,8 @@ public class WhipPublisher implements IRTCStream {
         // should pretty-print
         log.debug("Generated answer: {}", localSdp);
         // get answer sdp as a string
-        answerSdp = localSdp.toString().replaceAll("[\\r\\n|\\n]", "\\\\n");
+        //answerSdp = localSdp.toString().replaceAll("[\\r\\n|\\n]", "\\\\n"); // no cr/crlf replacing for direct http response
+        answerSdp = localSdp.toString();
     }
 
     /**
@@ -1208,8 +1221,14 @@ public class WhipPublisher implements IRTCStream {
                         log.debug("Remote DTLS: {}", remoteSetup);
                         switch (remoteSetup) {
                             case ACTIVE:
-                                dtlsControlSetup = Setup.PASSIVE;
                             case ACTPASS:
+                                dtlsControlSetup = Setup.PASSIVE;
+                                // if we're edge and want to publish, set dtls to active
+//                                if (conn.isEdge() && conn.getDuty().equals(Duty.PUBLISHER)) {
+//                                    dtlsControlSetup = Setup.ACTIVE;
+//                                } else {
+//                                    dtlsControlSetup = Setup.PASSIVE;
+//                                }
                                 break;
                             case PASSIVE:
                                 if (dtlsControlSetup.equals(remoteSetup)) {

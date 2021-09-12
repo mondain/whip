@@ -5,34 +5,54 @@
 </head>
 <body>
 <b>Whip it! real good</b>
-<br />
-<script>
-//Create peerconnection
+<br /><br />
+<div id="container"></div>
+<script type="text/javascript">
+// the stream name to publish
+var streamName = "stream1";
+// construct the divs
+var div = document.createElement('div');
+div.id = streamName;
+div.style.cssText = 'width:640px;height:480px;background:#eee;';
+document.getElementById('container').appendChild(div);
+var vid = document.createElement('video');
+vid.id = streamName + '_vid';
+vid.width = 640;
+vid.height = 480;
+vid.autoplay = true;
+vid.controls = true;
+document.getElementById(streamName).appendChild(vid);
+// handle any browser
 var RTCPeerConnection = navigator.mozGetUserMedia ? mozRTCPeerConnection : webkitRTCPeerConnection;
-const pc = new RTCPeerConnection();
-//Get mic+cam
-navigator.mediaDevices.getUserMedia({
-  audio: true,
-  video: {
-    width: { min: 640 },
-    height: { min: 480 }
+var SessionDescription = window.RTCSessionDescription || window.mozRTCSessionDescription || window.webkitRTCSessionDescription || window.msRTCSessionDescription;
+// create peerconnection
+const pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun3.l.google.com:19302'}], iceCandidatePoolSize:1});
+// get mic+cam
+async function whipIt(pc) {
+  const gumStream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: {
+      width: { min: 640 },
+      height: { min: 480 },
+      frameRate: { min: 25, max: 60 }
+    }
+  });
+  for (const track of gumStream.getTracks()) {
+      pc.addTrack(track);
   }
-})
-.then(function(stream) {
-	//Send all tracks
-	for (const track of stream.getTracks()) {
-		pc.addTrack(track);
-	}
-})
-.catch(function(err) {
-  console.error(err);
-});
-const url = "http://localhost:5080/whip/endpoint?streamId=stream1";
-const token = "thisisntusedyet";
-//Create whip client
-const whip = new WHIPClient();
-//Start publishing
-whip.publish(url, token, pc);
+  var video = document.getElementById(streamName + '_vid');
+  if (video) {
+      video.srcObject = gumStream;
+      video.play();
+  }
+  const url = "http://localhost:5080/whip/endpoint?streamId=" + streamName;
+  const token = "thisisntusedyet";
+  // create whip client
+  const whip = new WHIPClient();
+  // start publishing
+  whip.publish(url, token, pc);
+};
+whipIt(pc);
 </script>
 </body>
 </html>

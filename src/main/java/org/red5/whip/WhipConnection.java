@@ -15,17 +15,20 @@ import org.red5.server.net.rtmp.message.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.red5pro.media.MuteState;
 import com.red5pro.media.sdp.SDPUserAgent;
 import com.red5pro.override.IProStream;
 import com.red5pro.server.ConnectionAttributeKey;
 import com.red5pro.server.SignalingChannel;
+import com.red5pro.server.stream.IMuteCapableStreamer;
 import com.red5pro.server.stream.webrtc.IRTCStreamSession;
 import com.red5pro.webrtc.IRTCCapableConnection;
 import com.red5pro.webrtc.plugin.WebRTCPlugin;
 import com.red5pro.webrtc.session.SessionSourceTable;
 import com.red5pro.webrtc.session.SessionSourceTableEventHandler;
+import com.red5pro.webrtc.stream.RTCStream;
 
-public class WhipConnection extends RTMPConnection implements IRTCCapableConnection, SessionSourceTableEventHandler {
+public class WhipConnection extends RTMPConnection implements IRTCCapableConnection, SessionSourceTableEventHandler, IMuteCapableStreamer {
 
     private Logger log = LoggerFactory.getLogger(getClass());
 
@@ -83,12 +86,16 @@ public class WhipConnection extends RTMPConnection implements IRTCCapableConnect
 
     @Override
     public void close() {
-        log.debug("close - session id: {} client id: {}", sessionId, clientId);
         if (closed.compareAndSet(false, true)) {
+            log.debug("close - session id: {} client id: {}", sessionId, clientId);
             Red5.setConnectionLocal(this);
             setStateCode(RTMP.STATE_DISCONNECTING);
             if (session != null) {
-                session.stop();
+                try {
+                    session.stop();
+                } catch (Exception e) {
+                    // NPE thrown here when WhipSessionService isn't resolved by server classloader
+                }
                 session = null;
             }
             remotePartyTable.cancel();
@@ -411,6 +418,31 @@ public class WhipConnection extends RTMPConnection implements IRTCCapableConnect
     @Override
     public void setAttribute(ConnectionAttributeKey key, Object value) {
         setAttribute(key.value, value);
+    }
+
+    @Override
+    public boolean isMuted() {
+        if (session != null) {
+            RTCStream stream = (RTCStream) session.getRtcStream();
+            if (stream != null) {
+                // if either audio or video are muted
+                return (stream.isAudioMuted() == MuteState.MUTED || stream.isVideoMuted() == MuteState.MUTED);
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public MuteState[] getMuteStates() {
+        MuteState[] arr = new MuteState[] { MuteState.UNDEFINED, MuteState.UNDEFINED };
+        if (session != null) {
+            RTCStream stream = (RTCStream) session.getRtcStream();
+            if (stream != null) {
+                arr[0] = stream.isAudioMuted();
+                arr[1] = stream.isVideoMuted();
+            }
+        }
+        return arr;
     }
 
 }

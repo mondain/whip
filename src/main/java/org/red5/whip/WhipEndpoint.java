@@ -98,6 +98,8 @@ public class WhipEndpoint extends HttpServlet {
                 // connect to the scope
                 IScope scope = path.length() > 0 ? ScopeUtil.resolveScope(appScope, path, true, false) : appScope;
                 if (scope != null) {
+                    // http response sent already?
+                    boolean responseSent = false;
                     // create a wrapper for this connection
                     WhipConnection conn = new WhipConnection(request.getHeader("user-agent"));
                     conn.setClientId(streamId);
@@ -119,6 +121,7 @@ public class WhipEndpoint extends HttpServlet {
                         response.setContentLength(answerBytes.length);
                         try {
                             response.getOutputStream().write(answerBytes);
+                            responseSent = true;
                         } catch (Exception e) {
                             log.warn("Exception writing sdp answer", e);
                         }
@@ -130,18 +133,21 @@ public class WhipEndpoint extends HttpServlet {
                         }
                     } catch (Exception e) {
                         conn.close("Publisher failed", true);
-                        response.sendError(HttpServletResponse.SC_NOT_ACCEPTABLE);
+                        // error not allowed after response is sent
+                        if (!responseSent) {
+                            response.sendError(HttpServletResponse.SC_NOT_ACCEPTABLE, e.getMessage()); // 406
+                        }
+                        log.warn("Publish failed for {} at {}", streamId, requestedURI, e);
                     }
                 } else {
                     log.warn("Scope resolver failed for {} at {}", streamId, requestedURI);
-                    // send 404
                     response.sendError(HttpServletResponse.SC_NOT_FOUND);
                 }
             } else {
-                response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Invalid offer");
+                response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Invalid offer"); // 400
             }
         } else {
-            response.sendError(HttpServletResponse.SC_PRECONDITION_FAILED, "Service not ready or invalid request body");
+            response.sendError(HttpServletResponse.SC_PRECONDITION_FAILED, "Service not ready or invalid request body"); // 412
         }
     }
 

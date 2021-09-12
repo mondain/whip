@@ -50,6 +50,9 @@ public class WhipSessionService {
         publisher.setOffer(offerSdp);
         // build a stream session with an RTC source for tying rtc/rtmp stream together
         RTCStreamSession session = new RTCStreamSession(publisher, proStream);
+        // XXX this isnt available in the webapp classloader due to this classes resolution
+        // set the handler
+        //session.setHandler(this);
         // add session
         sessions.add(session);
         // tells the session to start internal members
