@@ -18,7 +18,6 @@ import com.red5pro.server.ConnectionAttributeKey;
 import com.red5pro.server.stream.webrtc.IRTCStream;
 import com.red5pro.server.stream.webrtc.IRTCStreamSession;
 import com.red5pro.webrtc.session.RTCStreamSession;
-import com.red5pro.webrtc.stream.RTCBroadcastStream;
 
 /**
  * Whip implementation of a session service.
@@ -83,18 +82,6 @@ public class WhipSessionService {
         return publisher;
     }
 
-    public void cleanupStreamSession(IBroadcastStream stream) {
-        if (stream != null) {
-            String streamName = stream.getPublishedName();
-            for (IRTCStreamSession session : sessions) {
-                if (session.getProStream().getPublishedName().equals(streamName) || ((IRTCStream) session.getRtcStream()).getName().equals(streamName)) {
-                    cleanupStreamSession(session);
-                    break;
-                }
-            }
-        }
-    }
-
     public IRTCStreamSession getStreamSessionForRequest(String requestId) {
         if (log.isDebugEnabled()) {
             log.debug("Get session for {}\n{}", requestId, sessions);
@@ -102,7 +89,7 @@ public class WhipSessionService {
         for (IRTCStreamSession session : sessions) {
             // look for matching request id
             IRTCStream rtcStream = (IRTCStream) session.getRtcStream();
-            if (rtcStream instanceof RTCBroadcastStream && ((RTCBroadcastStream) rtcStream).getId().equals(requestId)) {
+            if (rtcStream instanceof WhipPublisher && ((WhipPublisher) rtcStream).getName().equals(requestId)) {
                 log.debug("Session found for request: {}", session);
                 return session;
             }
@@ -111,9 +98,24 @@ public class WhipSessionService {
         return null;
     }
 
+    public void cleanupStreamSession(String requestId) {
+        if (log.isDebugEnabled()) {
+            log.debug("Clean up session for {}\n{}", requestId, sessions);
+        }
+        sessions.forEach(session -> {
+            // look for matching request id
+            IRTCStream rtcStream = (IRTCStream) session.getRtcStream();
+            if (rtcStream instanceof WhipPublisher && ((WhipPublisher) rtcStream).getName().equals(requestId)) {
+                log.debug("Session found for request: {}", session);
+                cleanupStreamSession(session);
+            }
+        });
+    }
+
     public void cleanupStreamSession(IRTCStreamSession session) {
         if (sessions.remove(session)) {
-            session.stop();
+            session.getRtcStream().stop();
+            session.getProStream().stop();
         }
     }
 

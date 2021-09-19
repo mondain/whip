@@ -7,6 +7,8 @@
 <b>Whip it! real good</b>
 <br /><br />
 <div id="container"></div>
+<br />
+<input id="stopBtn" type="button" value="stop" />
 <script type="text/javascript">
 // the stream name to publish
 var streamName = "stream1";
@@ -25,7 +27,7 @@ document.getElementById(streamName).appendChild(vid);
 // handle any browser
 var RTCPeerConnection = navigator.mozGetUserMedia ? mozRTCPeerConnection : webkitRTCPeerConnection;
 var SessionDescription = window.RTCSessionDescription || window.mozRTCSessionDescription || window.webkitRTCSessionDescription || window.msRTCSessionDescription;
-// create peerconnection
+// create peerconnection (if iceCandidatePoolSize is 0, the candidate priorities are equal)
 const pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun3.l.google.com:19302'}], iceCandidatePoolSize:1});
 // get mic+cam
 async function whipIt(pc) {
@@ -49,6 +51,8 @@ async function whipIt(pc) {
   const token = "thisisntusedyet";
   // create whip client
   const whip = new WHIPClient();
+  // add the button so we may stop
+  document.getElementById("stopBtn").onclick = function(){whip.stop();};
   // start publishing
   whip.publish(url, token, pc);
 };

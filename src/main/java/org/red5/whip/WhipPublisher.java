@@ -21,18 +21,14 @@ import org.apache.mina.core.session.IoSession;
 import org.ice4j.Transport;
 import org.ice4j.TransportAddress;
 import org.ice4j.ice.Agent;
-import org.ice4j.ice.CandidateExtendedType;
 import org.ice4j.ice.CandidatePair;
 import org.ice4j.ice.CandidateTcpType;
 import org.ice4j.ice.CandidateType;
 import org.ice4j.ice.Component;
-import org.ice4j.ice.HostCandidate;
 import org.ice4j.ice.IceMediaStream;
 import org.ice4j.ice.IceProcessingState;
 import org.ice4j.ice.LocalCandidate;
-import org.ice4j.ice.PeerReflexiveCandidate;
 import org.ice4j.ice.RemoteCandidate;
-import org.ice4j.ice.ServerReflexiveCandidate;
 import org.ice4j.socket.IceSocketWrapper;
 import org.jitsi.impl.neomedia.AudioMediaStreamImpl;
 import org.jitsi.impl.neomedia.MediaStreamImpl;
@@ -46,7 +42,6 @@ import org.red5.codec.AVCVideo;
 import org.red5.codec.StreamCodecInfo;
 import org.red5.server.api.IContext;
 import org.red5.server.api.Red5;
-import org.red5.server.api.IConnection.Duty;
 import org.red5.server.api.scope.IScope;
 import org.red5.server.stream.IProviderService;
 import org.slf4j.Logger;
@@ -82,7 +77,6 @@ import com.red5pro.server.util.PortManager;
 import com.red5pro.util.IdGenerator;
 import com.red5pro.webrtc.plugin.WebRTCPlugin;
 import com.red5pro.webrtc.stream.MuxMaster;
-import com.red5pro.webrtc.util.CandidateParser;
 
 /**
  * Represents Whip stream publisher.
@@ -183,6 +177,11 @@ public class WhipPublisher implements IRTCStream {
 
     // stream connector established upon successful ICE establishment
     private StreamConnector streamConnector;
+
+    // "selected" remote candidates port
+    private int remotePort;
+
+    private long remoteHostPriority, remoteSrflxPriority;
 
     /**
      * Whip / WebRTC publisher stream.
@@ -501,14 +500,8 @@ public class WhipPublisher implements IRTCStream {
 
     @SuppressWarnings("incomplete-switch")
     public void setupICE(boolean controlling) {
-        log.debug("setupICE: {} controlling: {} {}", getName(), controlling, conn);
-        Transport transport = conn.getTransport();
-        if (transport == Transport.UDP) {
-            agent.setControlling(controlling);
-        } else {
-            // if tcp, use controlled / passive, browsers send active candidates with masked ports
-            agent.setControlling(false);
-        }
+        log.debug("setupICE: {} controlling: {} transport: {}", getName(), controlling, conn.getTransport());
+        agent.setControlling(controlling);
         agent.setTrickling(false);
         log.trace("Agent state: {}", agent.getState());
         // create latch
@@ -550,14 +543,10 @@ public class WhipPublisher implements IRTCStream {
     private void configureMediaPorts(IceMediaStream stream) throws BindException {
         Transport transport = conn.getTransport();
         log.debug("Preferred transport for ICE media: {}", transport);
-        Component component = null;
         int port = PortManager.getRTPServerPort();
         log.info("Attempting to use port: {} for {}", port, getName());
         try {
-            // transport passed is used by the host harvester, its not stored nor does it
-            // cause other transports to be excluded.
-            component = agent.createComponent(stream, transport, port, port, port);
-            // if component creation fails "rtp" will be null and ex is thrown
+            Component component = agent.createComponent(stream, transport, port, port, port);
             allocatedPort = component.getSocket().getLocalPort();
             if (isDebug) {
                 log.debug("Port requested: {} port bound: {}", port, allocatedPort);
@@ -565,20 +554,6 @@ public class WhipPublisher implements IRTCStream {
             // if the requested port doesnt match the bound port (allocatedPort), clear the original reservation
             if (port != allocatedPort) {
                 PortManager.clearRTPServerPort(port);
-            }
-            // grab the local default candidate
-            LocalCandidate localCand = component.getDefaultCandidate();
-            // create transport components for our preferred transport
-            if (localCand != null) {
-                TransportAddress localAddress = localCand.getTransportAddress();
-                TransportAddress rflxAddress = new TransportAddress(publicIPAddress, localAddress.getPort(), transport);
-                // if the agent is controlling and prflx is enabled, we create a prflx to allow a best-effort connection
-                if (WebRTCPlugin.isPrflxEnabled() && agent.isControlling()) {
-                    long priority = localCand.computePriorityForType(CandidateType.PEER_REFLEXIVE_CANDIDATE);
-                    component.addLocalCandidate(new PeerReflexiveCandidate(rflxAddress, component, localCand, priority));
-                } else if (localCand instanceof HostCandidate) {
-                    component.addLocalCandidate(new ServerReflexiveCandidate(rflxAddress, (HostCandidate) localCand, null, CandidateExtendedType.STATICALLY_MAPPED_CANDIDATE));
-                }
             }
             log.debug("Candidate count for {}: {}", transport, component.getLocalCandidateCount());
         } catch (Throwable t) {
@@ -1223,12 +1198,6 @@ public class WhipPublisher implements IRTCStream {
                             case ACTIVE:
                             case ACTPASS:
                                 dtlsControlSetup = Setup.PASSIVE;
-                                // if we're edge and want to publish, set dtls to active
-//                                if (conn.isEdge() && conn.getDuty().equals(Duty.PUBLISHER)) {
-//                                    dtlsControlSetup = Setup.ACTIVE;
-//                                } else {
-//                                    dtlsControlSetup = Setup.PASSIVE;
-//                                }
                                 break;
                             case PASSIVE:
                                 if (dtlsControlSetup.equals(remoteSetup)) {
@@ -1281,33 +1250,75 @@ public class WhipPublisher implements IRTCStream {
             log.warn("No media entries exist in the sdp, session is not valid for streaming");
         }
     }
-
+    
     /** {@inheritDoc} */
     public void setRemoteCandidates(int mlineIndex, String remoteCandidates) {
         log.debug("setRemoteCandidates mlineIndex: {} {}", mlineIndex, remoteCandidates);
-        List<IceMediaStream> iceStreams = agent.getStreams();
-        if (mlineIndex < iceStreams.size()) {
-            IceMediaStream iceMediaStream = iceStreams.get(mlineIndex);
-            if (iceMediaStream != null) {
-                // parse incoming candidates (usually one-at-a-time)
-                List<RemoteCandidate> candidates = CandidateParser.parseRemoteCandidates(iceMediaStream, remoteCandidates);
-                // log.debug("Remote candidates at {}: {}", mlineIndex, candidates);
-                for (RemoteCandidate candidate : candidates) {
-                    // get the "matching" component if it exists
-                    Component component = iceMediaStream.getComponent(candidate.getComponentId());
-                    if (component != null) {
-                        // add the remote candidate to the component
-                        component.addRemoteCandidate(candidate);
-                        log.debug("Added remote candidate at {}: {}", mlineIndex, candidate);
-                    } else {
-                        log.warn("No component matching remote candidate at {}: {}", mlineIndex, candidate);
+        // skip candidates not matching our transport
+        if (remoteCandidates.contains(conn.getTransport().name().toLowerCase())) {
+            List<IceMediaStream> iceStreams = agent.getStreams();
+            if (mlineIndex < iceStreams.size()) {
+                IceMediaStream iceMediaStream = iceStreams.get(mlineIndex);
+                if (iceMediaStream != null) {
+                    // parse incoming candidates (usually one-at-a-time)
+                    List<RemoteCandidate> candidates = CandidateParser.parseRemoteCandidates(iceMediaStream, remoteCandidates);
+                    log.debug("Remote candidates at {}: {}", mlineIndex, candidates);
+                    for (RemoteCandidate candidate : candidates) {
+                        // get the "matching" component if it exists
+                        Component component = iceMediaStream.getComponent(candidate.getComponentId());
+                        if (component != null) {
+                            // ensure priority isnt the same for candidate entries of the same type (chrome does this)
+                            final CandidateType candType = candidate.getType();
+                            switch (candType) {
+                                case HOST_CANDIDATE:
+                                    int hostPort = candidate.getHostAddress().getPort();
+                                    if (remotePort == 0) {
+                                        remotePort = hostPort;
+                                    }
+                                    long hostPriority = candidate.getPriority();
+                                    if (remoteHostPriority == 0) {
+                                        remoteHostPriority = hostPriority;
+                                    } else if (remoteHostPriority == hostPriority) {
+                                        if (remotePort < hostPort) {
+                                            candidate.setPriority(hostPriority - 13L);
+                                        } else {
+                                            candidate.setPriority(hostPriority + 13L);
+                                        }
+                                    }
+                                    // add the remote host candidate to the component
+                                    component.addRemoteCandidate(candidate);
+                                    log.debug("Added remote host candidate at {}: {}", mlineIndex, candidate);
+                                    break;
+                                case SERVER_REFLEXIVE_CANDIDATE:
+                                    int reflexPort = candidate.getReflexiveAddress().getPort();
+                                    if (remotePort == 0) {
+                                        remotePort = reflexPort;
+                                    }
+                                    long reflexPriority = candidate.getPriority();
+                                    if (remoteSrflxPriority == 0) {
+                                        remoteSrflxPriority = reflexPriority;
+                                    } else if (remoteSrflxPriority == reflexPriority) {
+                                        if (remotePort < reflexPort) {
+                                            candidate.setPriority(reflexPriority - 13L);
+                                        } else {
+                                            candidate.setPriority(reflexPriority + 13L);
+                                        }
+                                    }
+                                    // add the remote host candidate to the component
+                                    component.addRemoteCandidate(candidate);
+                                    log.debug("Added remote reflexive candidate at {}: {}", mlineIndex, candidate);
+                                    break;
+                            }
+                        }
                     }
+                } else {
+                    log.warn("Unhandled mlineIndex: {}", mlineIndex);
                 }
             } else {
-                log.warn("Unhandled mlineIndex: {}", mlineIndex);
+                log.debug("No ICE stream for index: {}", mlineIndex);
             }
         } else {
-            log.debug("No ICE stream for index: {}", mlineIndex);
+            log.debug("Rejecting candiate due to transport");
         }
     }
 

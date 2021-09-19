@@ -1,3 +1,4 @@
+/* Based on code created by Sergio Garcia Murillo, modified by Paul Gregoire to be used with Red5 Pro. */
 class WHIPClient {
 
     constructor() {
@@ -11,6 +12,7 @@ class WHIPClient {
         this.endOfcandidates = false;
     }
 
+	// candidates are in-line to the SDP, no trickle used
     async publish(url, token, pc) {
         //If already publishing
         if (this.pc) {
@@ -71,24 +73,14 @@ class WHIPClient {
                 //No more candidates
                 this.endOfcandidates = true;
             }
-            //Schedule trickle on next tick
-            //if (!this.iceTrickeTimeout) {
-            //    this.iceTrickeTimeout = setTimeout(()=>this.trickle(),0);
-            //}
         };
         //Create SDP offer
         this.offer = await pc.createOffer();
         console.log(this.offer.sdp);
         //Set it and keep the promise
         const sld = pc.setLocalDescription(this.offer);
-        //Get the SDP answer
-        //const answer = await this.fetched.text();
-        //Wait until the offer was set locally
+        //Wait until the offer is set locally
         await sld;
-        //Schedule trickle on next tick
-        //if (!this.iceTrickeTimeout) {
-        //    this.iceTrickeTimeout = setTimeout(()=>this.trickle(),0);
-        //}
     }
 
     async sendOffer() {
@@ -101,89 +93,19 @@ class WHIPClient {
                 "Content-Type": "application/sdp"
             }
         });
-        //Get the resource url
-        this.resourceURL = new URL(fetched.headers.get("location"), this.endpointUrl);
-        console.log("Resource URL: " + this.resourceURL);
         //Get the SDP answer
         const answer = await fetched.text();
         //And set remote description
-        const srd = await pc.setRemoteDescription({type:"answer",sdp: answer});
-    }
-
-    async trickle() {
-        console.log("trickle");
-        //Clear timeout
-        this.iceTrickeTimeout = null;
-        //Check if there is any pending data
-        if (!this.candidates.length || !this.endOfcandidates || !this.resourceURL)
-            //Do nothing
-            return;
-        try {
-            //Get local ice properties
-            const local = this.pc.getTransceivers()[0].sender.transport.iceTransport.getLocalParameters();
-            //Get them for transport
-            this.iceUsername = local.usernameFragment;
-            this.icePassword = local.password;
-        } catch (e) {
-            //Fallback for browsers not supporting ice transport
-            this.iceUsername = this.offer.sdp.match(/a=ice-ufrag:(.*)\r\n/)[1];
-            this.icePassword = this.offer.sdp.match(/a=ice-pwd:(.*)\r\n/)[1];
-        }
-        //Prepare fragment
-        let fragment = 
-            "a=ice-ufrag:" + this.iceUsername + "\r\n" +
-            "a=ice-pwd:" + this.icePassword + "\r\n";
-        //Get peerconnection transceivers
-        const transceivers = this.pc.getTransceivers();
-        //Get medias
-        const medias = {};
-        //For each candidate
-        for (const candidate of this.candidates) {
-            //Get mid for candidate
-            const mid = candidate.sdpMid
-            //Get associated transceiver
-            const transceiver = transceivers.find(t=>t.mid==mid);
-            //Get media
-            let media = medias[mid];
-            //If not found yet
-            if (!media)
-                //Create media object
-                media = medias[mid] = {
-                    mid,
-                    kind : transceiver.receiver.track.kind,
-                    candidates: [],
-                };
-            //Add candidate
-            media.candidates.push(candidate);
-        }
-        //For each media
-        for (const media of Object.values(medias)) {
-            //Add media to fragment
-            fragment += 
-                "m="+ media.kind + " RTP/AVP 0\r\n" +
-                "a=mid:"+ media.mid + "\r\n";
-            //Add candidate
-            for (const candidate of media.candidates)
-                fragment += "a=" + candidate.candidate + "\r\n";
-            if (this.endOfcandidates)
-                fragment += "a=end-of-candiadates\r\n";
-        }
-        //Clean pending data
-        this.candidates = [];
-        this.endOfcandidates = false;
-        //Do the post request to the WHIP resource
-        await fetch(this.resourceURL, {
-            method: "PATCH",
-            body: fragment,
-            headers:{
-                "Content-Type": "application/trickle-ice-sdpfrag"
-            }
-        });
+        pc.setRemoteDescription({type:"answer",sdp: answer});
+        //Get the resource url
+        this.resourceURL = new URL(fetched.headers.get("location"), this.endpointUrl);
+        console.log("Resource URL: " + this.resourceURL);
     }
 
     async stop() {
-        //Cancel any pending timeout
-        this.iceTrickeTimeout = clearTimeout(this.iceTrickeTimeout);
+		if (!this.pc) {
+			throw new Error("Already stopped");
+		}
         //If we don't have the resource url
         if (this.resourceURL) {
             //Send a delete
@@ -192,7 +114,6 @@ class WHIPClient {
             });
         } else {
             console.error("WHIP resource url not available at stop");
-            //throw new Error("WHIP resource url not available yet");
         }
         //Close peerconnection
         this.pc.close();
